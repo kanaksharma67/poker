@@ -35,43 +35,68 @@ def gpt4v_poker_detector(image_path):
         base64_image = base64.b64encode(f.read()).decode("utf-8")
     
     response = client.chat.completions.create(
-        model="gpt-4-vision-preview",
+        model="gpt-4o",
         messages=[{
             "role": "user",
             "content": [
                 {
                     "type": "text",
-                    "text": """Analyze this poker table like a professional:
-1. **My Cards**: 2 cards near bottom center (highlighted usually)
-2. **Community Cards**: Center table (0 preflop, 3 flop, 4 turn, 5 river)
-3. **Buttons**: Red=Fold, Green=Call, Blue=Raise (mark active/inactive)
-4. **Villain**: Stack size and current bet amount
-5. **Pot**: Total pot value
-6. **Game State**: preflop/flop/turn/river
+                    "text": """Analyze this poker table screenshot with extreme precision and return ONLY a valid JSON object.
 
-Return JSON with:
-- All card coordinates (with rank/suit if visible)
-- Button positions and states
-- Villain stack/bet values
-- Exact bounding boxes for each element
-- Game state validation
+CRITICAL INSTRUCTIONS:
+- Look at the ACTUAL card faces and button text, not just positions
+- Read the exact text on buttons (FOLD, CHECK, CALL, RAISE, BET)
+- Identify card ranks and suits from the visible card faces
+- Pay attention to game state indicators (preflop/flop/turn/river)
 
-Example Output:
+DETECTION GUIDELINES:
+
+1. PLAYER CARDS (bottom center, usually highlighted):
+   - Look for 2 cards near the bottom center
+   - Read the actual card faces (e.g., "Ah" for Ace of Hearts, "Ks" for King of Spades)
+   - If cards are face down, use "unknown" for label
+
+2. COMMUNITY CARDS (center table):
+   - Count visible community cards: 0=preflop, 3=flop, 4=turn, 5=river
+   - Read actual card faces (e.g., "Jc" for Jack of Clubs)
+   - Include all visible community cards
+
+3. ACTION BUTTONS (bottom right area):
+   - Read the EXACT button text: "FOLD", "CHECK", "CALL", "RAISE", "BET"
+   - Note button states: active (highlighted) or inactive (grayed out)
+   - Look for betting amount text (e.g., "BET (1.2K)")
+
+4. STACKS AND POT:
+   - Read chip amounts from player stacks
+   - Find pot amount (usually displayed near center)
+   - Look for bet amounts and side pots
+
+5. GAME STATE:
+   - Count community cards to determine: preflop(0), flop(3), turn(4), river(5)
+   - Look for position indicators (D=Dealer, SB=Small Blind, BB=Big Blind)
+
+Return this exact JSON structure with ACTUAL values:
 {
   "player_cards": [
     {"label": "Ah", "x1": 500, "y1": 600, "x2": 550, "y2": 700},
     {"label": "Kd", "x1": 600, "y1": 600, "x2": 650, "y2": 700}
   ],
   "community_cards": [
-    {"label": "2h", "x1": 400, "y1": 300, "x2": 450, "y2": 400}
+    {"label": "Jc", "x1": 400, "y1": 300, "x2": 450, "y2": 400},
+    {"label": "4h", "x1": 500, "y1": 300, "x2": 550, "y2": 400},
+    {"label": "Jd", "x1": 600, "y1": 300, "x2": 650, "y2": 400}
   ],
   "buttons": [
-    {"label": "fold", "x1": 300, "y1": 650, "x2": 400, "y2": 700, "state": "active"}
+    {"label": "fold", "x1": 300, "y1": 650, "x2": 400, "y2": 700, "state": "active"},
+    {"label": "check", "x1": 500, "y1": 650, "x2": 600, "y2": 700, "state": "inactive"},
+    {"label": "bet", "x1": 700, "y1": 650, "x2": 800, "y2": 700, "state": "active"}
   ],
-  "villain": {"stack": 12500, "current_bet": 1000},
-  "pot": 3500,
+  "villain": {"stack": 19800, "current_bet": 0},
+  "pot": 106000,
   "game_state": "flop"
-}"""
+}
+
+IMPORTANT: Use "unknown" only if you cannot read the actual card face or button text. Otherwise, provide the exact values you see."""
                 },
                 {
                     "type": "image_url",
