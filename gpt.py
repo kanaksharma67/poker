@@ -141,9 +141,13 @@ def detect_colored_regions(image_path):
             x, y, w, h = cv2.boundingRect(contour)
             area = w * h
             
-            # Filter by size
-            if area > 500:  # Minimum area for poker elements
+            # Filter by size - UPDATED to avoid large table areas
+            if 500 < area < 15000:  # Changed: Added upper limit to avoid detecting large table areas
                 region_image = img[y:y+h, x:x+w]
+                
+                # Additional filter: Skip very large yellow regions (likely table background)
+                if color_name == "yellow_pot" and area > 8000:
+                    continue
                 
                 # Try to OCR this colored region
                 region_text = ocr_colored_region(region_image)
@@ -268,6 +272,127 @@ def detect_cards_advanced(image_path):
     
     return card_regions
 
+def detect_hand_strength_text(image_path):
+    """
+    NEW FUNCTION: Detect hand strength text under hole cards
+    """
+    print(f"\n🎯 DETECTING HAND STRENGTH TEXT")
+    
+    img = cv2.imread(image_path)
+    height, width = img.shape[:2]
+    
+    # Focus on bottom area where hand strength text usually appears
+    bottom_region_y = int(height * 0.6)  # Bottom 40% of image
+    bottom_region = img[bottom_region_y:height, 0:width]
+    
+    # Enhanced preprocessing for hand strength text
+    gray = cv2.cvtColor(bottom_region, cv2.COLOR_BGR2GRAY)
+    
+    # Multiple methods optimized for hand strength text
+    preprocessing_methods = [
+        ("original", gray),
+        ("enhanced", cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8)).apply(gray)),
+        ("binary", cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]),
+        ("adaptive", cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)),
+        ("inverted", cv2.bitwise_not(cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]))
+    ]
+    
+    hand_strength_regions = []
+    seen_texts = set()
+    
+    for method_name, processed_img in preprocessing_methods:
+        try:
+            # Run OCR with settings optimized for hand strength text
+            ocr_results = reader.readtext(processed_img, detail=1, paragraph=False,
+                                        width_ths=0.2, height_ths=0.2)
+            
+            for detection in ocr_results:
+                bbox_points = detection[0]
+                text = detection[1].strip().lower()
+                confidence = detection[2]
+                
+                # Check if this looks like hand strength text
+                if confidence > 0.25 and is_valid_hand_strength_text(text):
+                    # Avoid duplicates
+                    if text in seen_texts:
+                        continue
+                    seen_texts.add(text)
+                    
+                    # Calculate center (adjust for bottom region offset)
+                    center_x = sum([point[0] for point in bbox_points]) / 4
+                    center_y = sum([point[1] for point in bbox_points]) / 4 + bottom_region_y
+                    
+                    # Calculate bounding box (adjust for bottom region offset)
+                    x_coords = [point[0] for point in bbox_points]
+                    y_coords = [point[1] for point in bbox_points]
+                    
+                    x1, y1 = int(min(x_coords)), int(min(y_coords)) + bottom_region_y
+                    x2, y2 = int(max(x_coords)), int(max(y_coords)) + bottom_region_y
+                    
+                    # Extract region image with padding
+                    padding = 8
+                    region_y1 = max(0, y1 - padding)
+                    region_y2 = min(height, y2 + padding)
+                    region_x1 = max(0, x1 - padding)
+                    region_x2 = min(width, x2 + padding)
+                    
+                    region_image = img[region_y1:region_y2, region_x1:region_x2]
+                    
+                    hand_strength_regions.append({
+                        "text": text,
+                        "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                        "center_x": center_x,
+                        "center_y": center_y,
+                        "confidence": confidence,
+                        "region_image": region_image,
+                        "method": f"hand_strength_{method_name}"
+                    })
+                    
+                    print(f"   🎯 Hand Strength: '{text}' conf:{confidence:.2f} at ({center_x:.0f},{center_y:.0f})")
+        except Exception as e:
+            print(f"   ⚠️ Error with {method_name}: {e}")
+    
+    print(f"🎯 Total hand strength texts found: {len(hand_strength_regions)}")
+    return hand_strength_regions
+
+def is_valid_hand_strength_text(text):
+    """
+    NEW FUNCTION: Validate if text looks like poker hand strength
+    """
+    if not text or len(text) < 3:
+        return False
+    
+    text = text.lower().strip()
+    
+    # Common poker hand strength terms
+    hand_strength_terms = [
+        "high card", "high cards", "highcard",
+        "one pair", "pair", "onepair", "1 pair",
+        "two pair", "twopair", "2 pair", "two pairs",
+        "three of a kind", "three kind", "trips", "set",
+        "straight", "str8", "wheel",
+        "flush", "fl",
+        "full house", "fullhouse", "boat", "full",
+        "four of a kind", "four kind", "quads", "4oak",
+        "straight flush", "straightflush", "str8 fl",
+        "royal flush", "royalflush", "royal"
+    ]
+    
+    # Check if text contains any hand strength terms
+    for term in hand_strength_terms:
+        if term in text:
+            return True
+    
+    # Check for patterns like "A high", "K high", etc.
+    if re.search(r'[akqjt2-9]\s*high', text):
+        return True
+    
+    # Check for patterns like "pair of", "trips", etc.
+    if any(word in text for word in ["pair of", "trips", "set of", "quad"]):
+        return True
+    
+    return False
+
 def ocr_card_region_advanced(card_region):
     """
     Advanced OCR for card regions
@@ -339,34 +464,41 @@ def analyze_with_gpt4v_enhanced(region_image, text_content, position_info):
         _, buffer = cv2.imencode('.jpg', region_image)
         base64_image = base64.b64encode(buffer).decode('utf-8')
         
-        prompt = f"""Look at this poker game interface element that contains the text: "{text_content}"
+        # Add size context for better classification
+        region_area = (region_image.shape[0] * region_image.shape[1])
+        size_hint = ""
+        if region_area > 5000:
+            size_hint = " (LARGE AREA - likely background/table, not bet)"
 
-Position context: {position_info}
+        prompt = f"""Look at this poker game interface element that contains the text: "{text_content}"
+Position context: {position_info}{size_hint}
 
 Analyze this element and classify it as ONE of these poker elements:
 
 1. **BUTTON** - Action buttons like FOLD, CALL, RAISE, CHECK, BET, ALL-IN (usually green/orange colored buttons)
 2. **CARD** - Playing card values like A, K, Q, J, T, 2-9 (with or without suit symbols ♠♥♦♣)
-3. **BET** - Betting amounts (numbers like 100, 200, 800, 1.2K) - usually smaller amounts
+3. **BET** - Betting amounts (numbers like 100, 200, 800, 1.2K) - usually smaller amounts in specific bet areas
 4. **POT** - Pot amount (must contain "Pot" word or be in yellow pot area)
 5. **PLAYER_STACK** - Player's chip stack (large amounts like 4.2K, 18.6K, usually in red boxes)
 6. **VILLAIN_STACK** - Opponent's chip stack (large amounts like 66.7K, usually in red boxes)
 7. **GAME_ID** - Game identification (text like "Game I'd" or long numbers in header area)
-8. **OTHER** - None of the above
+8. **HAND_STRENGTH** - Hand strength text like "one pair", "high card", "flush", etc.
+9. **OTHER** - None of the above
 
 IMPORTANT CLASSIFICATION RULES:
 - **BUTTONS**: Look for action words in colored button areas (fold, call, raise, check, bet, all-in)
 - **CARDS**: Must be valid poker card ranks/suits (A,K,Q,J,T,2-9 with optional ♠♥♦♣)
 - **POT**: Only if contains "Pot" word OR is in center yellow area
+- **BET**: Only small numeric amounts in specific betting areas (NOT large table backgrounds)
+- **LARGE COLORED AREAS**: If this is a large colored background area, classify as OTHER
 - **PLAYER_STACK vs VILLAIN_STACK**:
   - PLAYER_STACK: Usually bottom area or closer to action buttons
   - VILLAIN_STACK: Usually top/side areas, away from action buttons
-- **BET**: Numeric amounts that are betting amounts (not stacks)
 - **GAME_ID**: Game identification text, usually in header/top area
+- **HAND_STRENGTH**: Text describing poker hands like "one pair", "high card", "flush", etc.
 
 Based on the image and text "{text_content}", what poker element is this?
-
-Respond with ONLY ONE WORD: BUTTON, CARD, BET, POT, PLAYER_STACK, VILLAIN_STACK, GAME_ID, or OTHER"""
+Respond with ONLY ONE WORD: BUTTON, CARD, BET, POT, PLAYER_STACK, VILLAIN_STACK, GAME_ID, HAND_STRENGTH, or OTHER"""
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -410,7 +542,7 @@ def determine_game_state(cards, buttons):
         if "center_y" not in card:
             print(f"   ⚠️ Warning: Card missing center_y: {card}")
             continue
-            
+        
         center_y = card["center_y"]
         # Cards in upper half are likely community cards
         if center_y < 400:  # Adjust based on typical poker interface
@@ -441,7 +573,7 @@ def determine_game_state(cards, buttons):
         if "value" not in button:
             print(f"   ⚠️ Warning: Button missing value: {button}")
             continue
-            
+        
         button_text = button["value"].lower()
         if button_text in ['fold', 'call', 'raise', 'check', 'bet', 'all-in']:
             active_buttons.append(button_text)
@@ -511,13 +643,16 @@ def process_poker_image_advanced(image_path):
     # Step 3: Detect cards
     card_regions = detect_cards_advanced(image_path)
     
+    # Step 4: NEW - Detect hand strength text
+    hand_strength_regions = detect_hand_strength_text(image_path)
+    
     # Combine all regions
-    all_regions = text_regions + colored_regions + card_regions
+    all_regions = text_regions + colored_regions + card_regions + hand_strength_regions
     
     # Remove duplicates based on proximity
     unique_regions = remove_duplicate_regions(all_regions)
     
-    # Step 4: Analyze each region with GPT-4V
+    # Step 5: Analyze each region with GPT-4V
     results = {
         "buttons": [],
         "cards": [],
@@ -526,6 +661,7 @@ def process_poker_image_advanced(image_path):
         "player_stack": [],
         "villain_stack": [],
         "game_id": [],
+        "hand_strength": [],  # NEW CATEGORY
         "other": []
     }
     
@@ -576,14 +712,16 @@ def process_poker_image_advanced(image_path):
             results["villain_stack"].append(element)
         elif element_type == "GAME_ID":
             results["game_id"].append(element)
+        elif element_type == "HAND_STRENGTH":  # NEW CATEGORY
+            results["hand_strength"].append(element)
         else:
             results["other"].append(element)
     
-    # Step 5: Determine game state
+    # Step 6: Determine game state
     game_state_info = determine_game_state(results["cards"], results["buttons"])
     results["game_state"] = game_state_info
     
-    # Step 6: Create comprehensive summary
+    # Step 7: Create comprehensive summary
     summary = {
         "total_buttons": len(results["buttons"]),
         "total_cards": len(results["cards"]),
@@ -592,6 +730,7 @@ def process_poker_image_advanced(image_path):
         "total_player_stack": len(results["player_stack"]),
         "total_villain_stack": len(results["villain_stack"]),
         "total_game_id": len(results["game_id"]),
+        "total_hand_strength": len(results["hand_strength"]),  # NEW
         
         "button_values": [btn["value"] for btn in results["buttons"]],
         "card_values": [card["value"] for card in results["cards"]],
@@ -600,6 +739,7 @@ def process_poker_image_advanced(image_path):
         "player_stack_values": [stack["value"] for stack in results["player_stack"]],
         "villain_stack_values": [stack["value"] for stack in results["villain_stack"]],
         "game_id_values": [gid["value"] for gid in results["game_id"]],
+        "hand_strength_values": [hand["value"] for hand in results["hand_strength"]],  # NEW
         
         "game_state": game_state_info["state"],
         "player_turn": game_state_info["player_turn"],
@@ -616,6 +756,7 @@ def process_poker_image_advanced(image_path):
     print(f"   💵 Player Stack: {summary['total_player_stack']} - {summary['player_stack_values']}")
     print(f"   💵 Villain Stack: {summary['total_villain_stack']} - {summary['villain_stack_values']}")
     print(f"   🆔 Game ID: {summary['total_game_id']} - {summary['game_id_values']}")
+    print(f"   🎯 Hand Strength: {summary['total_hand_strength']} - {summary['hand_strength_values']}")  # NEW
     print(f"   🎮 Game State: {summary['game_state']}")
     print(f"   🎮 Player Turn: {summary['player_turn']}")
     print(f"   🎮 Active Buttons: {summary['active_buttons']}")
@@ -653,7 +794,7 @@ def remove_duplicate_regions(regions):
 
 def visualize_advanced_detection(image_path, results):
     """
-    Advanced visualization with game state
+    Advanced visualization with game state and hand strength
     """
     img = Image.open(image_path)
     width, height = img.size
@@ -670,7 +811,8 @@ def visualize_advanced_detection(image_path, results):
         "pot": "#00FFFF",            # Cyan
         "player_stack": "#FF69B4",   # Hot Pink
         "villain_stack": "#FFA500",  # Orange
-        "game_id": "#9370DB"         # Purple
+        "game_id": "#9370DB",        # Purple
+        "hand_strength": "#FF1493"   # NEW - Deep Pink
     }
     
     def draw_elements_advanced(elements, color, prefix, font_size=11):
@@ -697,6 +839,8 @@ def visualize_advanced_detection(image_path, results):
                 label += " (COLOR)"
             elif method == "card_detection":
                 label += " (CV)"
+            elif "hand_strength" in method:
+                label += " (HAND)"
             
             ax.text(
                 bbox["x1"], bbox["y1"] - 10,
@@ -715,6 +859,7 @@ def visualize_advanced_detection(image_path, results):
     draw_elements_advanced(results["player_stack"], colors["player_stack"], "PLAYER", 11)
     draw_elements_advanced(results["villain_stack"], colors["villain_stack"], "VILLAIN", 11)
     draw_elements_advanced(results["game_id"], colors["game_id"], "GAME_ID", 10)
+    draw_elements_advanced(results["hand_strength"], colors["hand_strength"], "HAND", 13)  # NEW
     
     # Enhanced summary display
     summary = results["summary"]
@@ -732,10 +877,22 @@ def visualize_advanced_detection(image_path, results):
         bbox=dict(facecolor=state_color, alpha=0.95, edgecolor='white', pad=8)
     )
     
+    # Hand strength display - NEW
+    if summary['hand_strength_values']:
+        ax.text(
+            width/2, 90,
+            f"HAND: {', '.join(summary['hand_strength_values']).upper()}",
+            color=colors["hand_strength"],
+            fontsize=16,
+            weight='bold',
+            ha='center',
+            bbox=dict(facecolor='black', alpha=0.9, edgecolor=colors["hand_strength"], pad=6)
+        )
+    
     # Active buttons
     if game_state["active_buttons"]:
         ax.text(
-            width/2, 90,
+            width/2, 130,
             f"ACTIVE: {', '.join(game_state['active_buttons']).upper()}",
             color=colors["buttons"],
             fontsize=14,
@@ -744,8 +901,8 @@ def visualize_advanced_detection(image_path, results):
             bbox=dict(facecolor='black', alpha=0.9, edgecolor=colors["buttons"], pad=5)
         )
     
-    # Element counts
-    counts_text = f"Buttons:{summary['total_buttons']} | Cards:{summary['total_cards']} | Bets:{summary['total_bets']} | Pot:{summary['total_pot']} | Player:{summary['total_player_stack']} | Villain:{summary['total_villain_stack']} | ID:{summary['total_game_id']}"
+    # Element counts - UPDATED
+    counts_text = f"Buttons:{summary['total_buttons']} | Cards:{summary['total_cards']} | Bets:{summary['total_bets']} | Pot:{summary['total_pot']} | Player:{summary['total_player_stack']} | Villain:{summary['total_villain_stack']} | Hand:{summary['total_hand_strength']} | ID:{summary['total_game_id']}"
     ax.text(
         10, height - 60,
         counts_text,
@@ -758,7 +915,7 @@ def visualize_advanced_detection(image_path, results):
     # Values display
     if summary['pot_values']:
         ax.text(
-            width/2, 130,
+            width/2, 170,
             f"POT: {', '.join(summary['pot_values'])}",
             color=colors["pot"],
             fontsize=16,
@@ -807,9 +964,10 @@ def run_advanced_poker_detection():
     print("📝 Enhanced text extraction with multiple methods")
     print("🎨 Colored region detection for poker interface elements")
     print("🃏 Advanced card detection with multiple color spaces")
+    print("🎯 NEW: Hand strength text detection (one pair, high card, etc.)")
     print("🤖 GPT-4V analysis with position context")
     print("🎮 Game state determination")
-    print("🎯 Target: BUTTONS | CARDS | BET | POT | PLAYER_STACK | VILLAIN_STACK | GAME_ID | GAME_STATE")
+    print("🎯 Target: BUTTONS | CARDS | BET | POT | PLAYER_STACK | VILLAIN_STACK | GAME_ID | HAND_STRENGTH | GAME_STATE")
     print("=" * 70)
     
     # Get image files
@@ -851,6 +1009,7 @@ if __name__ == "__main__":
     print("🎯 ADVANCED POKER DETECTION SYSTEM")
     print("🎨 Detects colored regions (red stacks, yellow pot, green buttons)")
     print("🃏 Advanced card detection with multiple methods")
+    print("🎯 NEW: Hand strength detection (one pair, high card, flush, etc.)")
     print("🤖 GPT-4V with position context for accurate classification")
     print("🎮 Game state detection (preflop/flop/turn/river + player turn)")
     print("📊 Comprehensive analysis matching your poker interface!")
@@ -860,4 +1019,4 @@ if __name__ == "__main__":
     
     print("\n✅ Advanced poker detection completed!")
     print(f"📁 Check comprehensive results in: {OUTPUT_CHECK_DIR}")
-    print("🎯 Should detect exactly like your poker interface!")
+    print("🎯 Should detect exactly like your poker interface + hand strength!")
