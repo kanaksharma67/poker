@@ -23,6 +23,78 @@ OUTPUT_CHECK_DIR = "./checkingimg"
 os.makedirs(OUTPUT_CHECK_DIR, exist_ok=True)
 TEST_IMAGE_COUNT = 3
 
+def analyze_card_with_gpt4(card_image, card_type="unknown"):
+    """
+    Use GPT-4 Vision to analyze card images and extract rank + suit
+    """
+    try:
+        # Convert image to base64
+        _, buffer = cv2.imencode('.jpg', card_image)
+        base64_image = base64.b64encode(buffer).decode('utf-8')
+        
+        # Create specific prompt based on card type
+        if card_type == "community":
+            prompt = """You are analyzing a poker community card image. 
+
+Look carefully at the card and identify:
+1. The card rank (A, K, Q, J, T, 2, 3, 4, 5, 6, 7, 8, 9)
+2. The card suit (♠ spades, ♥ hearts, ♦ diamonds, ♣ clubs)
+
+Return ONLY the card in this exact format: rank+suit
+Examples: As, Kh, Qd, Jc, Td, 9s, 8h, 7c, 6d, 5s, 4h, 3c, 2d
+
+If you can see the card clearly, return the rank+suit.
+If you cannot read the card, return "unknown".
+
+Respond with ONLY the card value (e.g., "As") or "unknown"."""
+        else:
+            prompt = """You are analyzing a poker card image. 
+
+Look carefully at the card and identify:
+1. The card rank (A, K, Q, J, T, 2, 3, 4, 5, 6, 7, 8, 9)
+2. The card suit (♠ spades, ♥ hearts, ♦ diamonds, ♣ clubs)
+
+Return ONLY the card in this exact format: rank+suit
+Examples: As, Kh, Qd, Jc, Td, 9s, 8h, 7c, 6d, 5s, 4h, 3c, 2d
+
+If you can see the card clearly, return the rank+suit.
+If you cannot read the card, return "unknown".
+
+Respond with ONLY the card value (e.g., "As") or "unknown"."""
+        
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}",
+                            "detail": "high"
+                        }
+                    }
+                ]
+            }],
+            max_tokens=10,
+            temperature=0.0
+        )
+        
+        result = response.choices[0].message.content.strip()
+        
+        # Validate the result
+        if is_valid_poker_card(result):
+            print(f"      🤖 GPT-4 Card Detection: {result}")
+            return result
+        else:
+            print(f"      🤖 GPT-4 Card Detection: invalid result '{result}', trying OCR fallback")
+            return None
+            
+    except Exception as e:
+        print(f"      ❌ GPT-4 Card Analysis Error: {e}")
+        return None
+
 def extract_text_regions_focused(image_path):
     """
     Extract text regions with focus on poker essentials only
@@ -193,9 +265,9 @@ def detect_game_state(img):
 
 def detect_community_cards_enhanced(img):
     """
-    Enhanced community card detection specifically for JungleePoker
+    Enhanced community card detection with GPT-4 analysis
     """
-    print(f"\n🃏 ENHANCED COMMUNITY CARD DETECTION")
+    print(f"\n🃏 ENHANCED COMMUNITY CARD DETECTION (GPT-4)")
     
     height, width = img.shape[:2]
     
@@ -237,13 +309,18 @@ def detect_community_cards_enhanced(img):
         
         print(f"   🃏 Found {len(unique_cards)} potential community cards in region {region_idx + 1}")
         
-        # Process each card with enhanced OCR
+        # Process each card with GPT-4 analysis
         for i, card_data in enumerate(unique_cards):
-            card_text = ocr_community_card_enhanced(card_data["region_image"])
+            # Use GPT-4 for card analysis
+            card_text = analyze_card_with_gpt4(card_data["region_image"], "community")
+            
+            # Fallback to OCR if GPT-4 fails
+            if not card_text:
+                card_text = ocr_community_card_enhanced(card_data["region_image"])
             
             if card_text and is_valid_poker_card(card_text):
                 card_data["text"] = card_text
-                card_data["method"] = f"community_enhanced_region_{region_idx + 1}"
+                card_data["method"] = f"community_gpt4_region_{region_idx + 1}"
                 card_data["card_type"] = "community"
                 all_community_cards.append(card_data)
                 print(f"   🃏 Community Card {len(all_community_cards)}: {card_text}")
@@ -536,7 +613,7 @@ def ocr_community_card_enhanced(card_region):
 
 def format_community_card(text):
     """
-    Format community card text to rank+suit format
+    Format community card text to rank+suit format - ENHANCED
     """
     text = text.upper().strip()
     
@@ -547,13 +624,13 @@ def format_community_card(text):
         
         if rank in 'AKQJT23456789':
             # Convert suit symbols/letters to standard format
-            if '♠' in suit_part or 'S' in suit_part:
+            if '♠' in suit_part or 'S' in suit_part or 'SPADE' in suit_part:
                 return f"{rank}s"
-            elif '♥' in suit_part or 'H' in suit_part:
+            elif '♥' in suit_part or 'H' in suit_part or 'HEART' in suit_part:
                 return f"{rank}h"
-            elif '♦' in suit_part or 'D' in suit_part:
+            elif '♦' in suit_part or 'D' in suit_part or 'DIAMOND' in suit_part:
                 return f"{rank}d"
-            elif '♣' in suit_part or 'C' in suit_part:
+            elif '♣' in suit_part or 'C' in suit_part or 'CLUB' in suit_part:
                 return f"{rank}c"
     
     # Handle 10 specially
@@ -561,13 +638,13 @@ def format_community_card(text):
         rank = 'T'
         if len(text) > 2:
             suit_part = text[2:]
-            if '♠' in suit_part or 'S' in suit_part:
+            if '♠' in suit_part or 'S' in suit_part or 'SPADE' in suit_part:
                 return f"{rank}s"
-            elif '♥' in suit_part or 'H' in suit_part:
+            elif '♥' in suit_part or 'H' in suit_part or 'HEART' in suit_part:
                 return f"{rank}h"
-            elif '♦' in suit_part or 'D' in suit_part:
+            elif '♦' in suit_part or 'D' in suit_part or 'DIAMOND' in suit_part:
                 return f"{rank}d"
-            elif '♣' in suit_part or 'C' in suit_part:
+            elif '♣' in suit_part or 'C' in suit_part or 'CLUB' in suit_part:
                 return f"{rank}c"
         return rank
     
@@ -698,7 +775,12 @@ def detect_hole_cards_region(hole_card_region, offset_y):
     
     # Process each potential hole card
     for i, card_data in enumerate(potential_cards):
-        card_text = ocr_card_region_enhanced(card_data["region_image"])
+        # Use GPT-4 for hole card analysis
+        card_text = analyze_card_with_gpt4(card_data["region_image"], "hole")
+        
+        # Fallback to OCR methods if GPT-4 fails
+        if not card_text:
+            card_text = ocr_card_region_enhanced(card_data["region_image"])
         
         if not card_text:
             card_text = ocr_card_region_simple(card_data["region_image"])
@@ -712,9 +794,9 @@ def detect_hole_cards_region(hole_card_region, offset_y):
                 "bbox": card_data["bbox"],
                 "center_x": card_data["center_x"],
                 "center_y": card_data["center_y"],
-                "confidence": 0.9,
+                "confidence": 0.95,  # Higher confidence for GPT-4 detection
                 "region_image": card_data["region_image"],
-                "method": "hole_card_detection",
+                "method": "hole_card_gpt4_detection",
                 "card_position": "left" if i == 0 else "right" if i == 1 else f"card_{i+1}"
             })
             print(f"   🃏 Hole Card {i+1}: {card_text}")
@@ -858,8 +940,11 @@ def detect_cards_aggressive(img):
                     full_x = x + x1
                     card_region = img[full_y:full_y+h, full_x:full_x+w]
                     
-                    # Try OCR
-                    card_text = ocr_card_region_aggressive(card_region)
+                    # Try GPT-4 first, then OCR fallback
+                    card_text = analyze_card_with_gpt4(card_region, "aggressive")
+                    
+                    if not card_text:
+                        card_text = ocr_card_region_aggressive(card_region)
                     
                     if card_text and is_valid_poker_card(card_text):
                         # Check if we already have this card (avoid duplicates)
@@ -876,9 +961,9 @@ def detect_cards_aggressive(img):
                                 "bbox": {"x1": full_x, "y1": full_y, "x2": full_x + w, "y2": full_y + h},
                                 "center_x": full_x + w/2,
                                 "center_y": full_y + h/2,
-                                "confidence": 0.7,
+                                "confidence": 0.8,  # Higher confidence for GPT-4
                                 "region_image": card_region,
-                                "method": "aggressive_detection"
+                                "method": "aggressive_gpt4_detection"
                             })
                             print(f"   🃏 Aggressive Card: {card_text} at ({full_x + w/2:.0f}, {full_y + h/2:.0f})")
                             
@@ -981,7 +1066,7 @@ def combine_rank_and_suit(detected_texts):
             suit_part = text[1:]
             
             if (rank_part in 'AKQJT23456789' and
-                 any(s in suit_part for s in ['♠', '♥', '♦', '♣', 'S', 'H', 'D', 'C'])):
+                 any(s in suit_part for s in ['H', 'S', 'D', 'C', '♠', '♥', '♦', '♣', 'HEARTS', 'SPADES', 'DIAMONDS', 'CLUBS', 'H', 'S', 'D', 'C'])):
                 return format_card_value(text)
     
     # Try to combine best rank with best suit
@@ -1041,35 +1126,34 @@ def format_card_value(card_text):
 
 def is_valid_poker_card(text):
     """
-    Enhanced poker card validation
+    Enhanced poker card validation - MORE LENIENT
     """
     if not text:
         return False
     
     text = text.upper().strip()
     
-    # Single ranks
-    if text in ['A', 'K', 'Q', 'J', 'T', '10', '2', '3', '4', '5', '6', '7', '8', '9']:
+    # Single ranks - EXPANDED LIST
+    if text in ['A', 'K', 'Q', 'J', 'T', '10', '2', '3', '4', '5', '6', '7', '8', '9', '1', '0']:
         return True
     
-    # Rank with suit (like Ah, Ks, Td, 9c)
+    # Rank with suit - ENHANCED PATTERN MATCHING
     if len(text) >= 2:
         rank = text[0]
-        suit_part = text[1:].lower()
-        
-        if rank in 'AKQJT23456789':
-            # Check for suit characters
-            if any(s in suit_part for s in ['h', 's', 'd', 'c', '♠', '♥', '♦', '♣']):
-                return True
-            # Check for suit words
-            if any(s in suit_part for s in ['heart', 'spade', 'diamond', 'club']):
-                return True
-    
-    # Handle "10" with suit
-    if text.startswith('10') and len(text) >= 3:
-        suit_part = text[2:].lower()
-        if any(s in suit_part for s in ['h', 's', 'd', 'c', '♠', '♥', '♦', '♣']):
+        suit_part = text[1:]
+        if (rank in 'AKQJT23456789' and 
+            any(s in suit_part for s in ['H', 'S', 'D', 'C', '♠', '♥', '♦', '♣', 'HEARTS', 'SPADES', 'DIAMONDS', 'CLUBS', 'H', 'S', 'D', 'C'])):
             return True
+    
+    # Handle "10" specially
+    if text.startswith('10') and len(text) >= 3:
+        suit_part = text[2:]
+        if any(s in suit_part for s in ['H', 'S', 'D', 'C', '♠', '♥', '♦', '♣']):
+            return True
+    
+    # Handle partial card text (just rank)
+    if text in ['A', 'K', 'Q', 'J', 'T', '2', '3', '4', '5', '6', '7', '8', '9']:
+        return True
     
     return False
 
@@ -1087,25 +1171,27 @@ Position: {position_info}
 Classify as ONE of these ESSENTIAL poker elements ONLY:
 1. *COMMUNITY_CARD* - Playing cards at the center of the screen (3-5 cards). Example: 2♠ 3♦ 4♥ 5♣ 6♠
 2. *HOLE_CARD* - Player's private cards (usually 2 cards at bottom). Example: 2♠ 3♦
-3. *BET* - Betting amounts (numbers like 200, 800, 1.2K) - current bet amounts
-4. *STACK* - Chip stack amounts (like 4.8K, 66.7K, 18.6K, 2.4K) - player chip stacks
-5. *POT* - Pot amount (contains "Pot" like "Pot:1.1K")
-6. *BUTTON* - Action buttons (FOLD, CHECK, RAISE, CALL, BET, ALL-IN)
-7. *GAME_STATE* - Game phase indicators (PREFLOP, FLOP, TURN, RIVER)
-8. *OTHER* - None of the above
+3. *BET* - Current betting amounts (numbers like 200, 800, 1.2K, 1.4K, 2.5K, 3.8K, 4.2K) - active bets being wagered
+4. *CHIPS* - Individual chip values (numbers like 100, 500, 1K, 2K, 5K) - chip denominations
+5. *STACK* - Player chip stack amounts (like 6.8K, 66.7K, 18.6K, 25.4K) - total player chips
+6. *POT* - Pot amount (contains "Pot" like "Pot:1.1K")
+7. *BUTTON* - Action buttons (FOLD, CHECK, RAISE, CALL, BET, ALL-IN)
+8. *GAME_STATE* - Game phase indicators (PREFLOP, FLOP, TURN, RIVER)
+9. *OTHER* - None of the above
 
 STRICT RULES:
 - *COMMUNITY_CARD*: Valid poker card in center area (A,K,Q,J,T,2-9 with optional suits)
 - *HOLE_CARD*: Valid poker card in bottom area (player's cards)
-- *BET*: Numeric betting amounts being wagered
-- *STACK*: Chip stack amounts (usually with K suffix like 4.8K, 66.7K)
+- *BET*: Current betting amounts up to 5K (200, 800, 1.2K, 1.4K, 2.5K, 3.8K, 4.2K) - active bets
+- *CHIPS*: Individual chip denominations (100, 500, 1K, 2K, 5K) - chip values
+- *STACK*: Player chip stack amounts 6K and above (6.8K, 66.7K, 18.6K, 25.4K) - total chips
 - *POT*: Must contain "Pot" word
 - *BUTTON*: Action words only (fold, check, raise, call, bet, all-in)
 - *GAME_STATE*: Game phase words (preflop, flop, turn, river)
 - *OTHER*: Everything else (UI elements, game info, etc.)
 
 Text: "{text_content}"
-Respond with ONLY: COMMUNITY_CARD, HOLE_CARD, BET, STACK, POT, BUTTON, GAME_STATE, or OTHER"""
+Respond with ONLY: COMMUNITY_CARD, HOLE_CARD, BET, CHIPS, STACK, POT, BUTTON, GAME_STATE, or OTHER"""
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -1186,6 +1272,7 @@ def process_poker_image_focused(image_path):
         "community_cards": [],
         "hole_cards": [],
         "bets": [],
+        "chips": [],
         "stacks": [],
         "pot": [],
         "buttons": [],
@@ -1234,6 +1321,8 @@ def process_poker_image_focused(image_path):
             results["hole_cards"].append(element)
         elif element_type == "BET":
             results["bets"].append(element)
+        elif element_type == "CHIPS":
+            results["chips"].append(element)
         elif element_type == "STACK":
             results["stacks"].append(element)
         elif element_type == "POT":
@@ -1253,6 +1342,7 @@ def process_poker_image_focused(image_path):
         "total_community_cards": len(results["community_cards"]),
         "total_hole_cards": len(results["hole_cards"]),
         "total_bets": len(results["bets"]),
+        "total_chips": len(results["chips"]),
         "total_stacks": len(results["stacks"]),
         "total_pot": len(results["pot"]),
         "total_buttons": len(results["buttons"]),
@@ -1260,6 +1350,7 @@ def process_poker_image_focused(image_path):
         "community_card_values": [card["value"] for card in results["community_cards"]],
         "hole_card_values": [card["value"] for card in results["hole_cards"]],
         "bet_values": [bet["value"] for bet in results["bets"]],
+        "chip_values": [chip["value"] for chip in results["chips"]],
         "stack_values": [stack["value"] for stack in results["stacks"]],
         "pot_values": [pot["value"] for pot in results["pot"]],
         "button_values": [btn["value"] for btn in results["buttons"]]
@@ -1272,6 +1363,7 @@ def process_poker_image_focused(image_path):
     print(f"   🃏 Community Cards: {summary['total_community_cards']} - {summary['community_card_values']}")
     print(f"   🃏 Hole Cards: {summary['total_hole_cards']} - {summary['hole_card_values']}")
     print(f"   💰 Bets: {summary['total_bets']} - {summary['bet_values']}")
+    print(f"   🪙 Chips: {summary['total_chips']} - {summary['chip_values']}")
     print(f"   💵 Stacks: {summary['total_stacks']} - {summary['stack_values']}")
     print(f"   🏆 Pot: {summary['total_pot']} - {summary['pot_values']}")
     print(f"   🔘 Buttons: {summary['total_buttons']} - {summary['button_values']}")
@@ -1415,24 +1507,25 @@ def visualize_focused_detection(image_path, results):
     )
     
     # Save visualization
-    output_filename = os.path.basename(image_path).split('.')[0] + '_enhanced_poker_detection.png'
+    output_filename = os.path.basename(image_path).split('.')[0] + '_gpt4_enhanced_poker_detection.png'
     output_path = os.path.join(OUTPUT_CHECK_DIR, output_filename)
     plt.savefig(output_path, bbox_inches='tight', dpi=150, facecolor='white')
     plt.close()
     
-    print(f"✅ Enhanced visualization saved: {output_path}")
+    print(f"✅ GPT-4 Enhanced visualization saved: {output_path}")
 
 def run_focused_poker_detection():
     """
-    Run enhanced poker detection system with community card focus
+    Run enhanced poker detection system with GPT-4 card analysis
     """
-    print("🚀 ENHANCED POKER DETECTION SYSTEM")
+    print("🚀 GPT-4 ENHANCED POKER DETECTION SYSTEM")
     print("=" * 60)
     print("🎯 ESSENTIAL ELEMENTS: COMMUNITY CARDS | HOLE CARDS | BETS | STACKS | POT | BUTTONS")
     print("🎮 GAME STATES: PREFLOP | FLOP | TURN | RIVER")
     print("🃏 COMMUNITY CARDS: 3-5 cards in center with rank+suit (3h, Ks, etc.)")
+    print("🤖 GPT-4 VISION: Advanced card rank+suit detection")
     print("🚫 IGNORES: Game IDs, UI elements, hand strength, everything else")
-    print("✨ CLEAN & PRECISE: JungleePoker optimized detection")
+    print("✨ CLEAN & PRECISE: JungleePoker optimized detection with GPT-4")
     print("=" * 60)
     
     # Get image files
@@ -1443,14 +1536,14 @@ def run_focused_poker_detection():
         print(f"❌ No images found in {INPUT_IMAGE_DIR}")
         return
     
-    print(f"📁 Processing {len(image_files)} images with enhanced detection")
+    print(f"📁 Processing {len(image_files)} images with GPT-4 enhanced detection")
     
     # Process each image
     for filename in tqdm(image_files, desc="🔄 Processing"):
         try:
             image_path = os.path.join(INPUT_IMAGE_DIR, filename)
             
-            # Enhanced processing with community card focus
+            # Enhanced processing with GPT-4 card analysis
             results = process_poker_image_focused(image_path)
             
             # Create enhanced visualization
@@ -1463,7 +1556,7 @@ def run_focused_poker_detection():
             with open(json_path, 'w') as f:
                 json.dump(results, f, indent=2)
             
-            print(f"💾 Enhanced results saved: {json_path}")
+            print(f"💾 GPT-4 Enhanced results saved: {json_path}")
             
         except Exception as e:
             print(f"❌ Error processing {filename}: {e}")
@@ -1471,9 +1564,10 @@ def run_focused_poker_detection():
             traceback.print_exc()
 
 if __name__ == "__main__":
-    print("🎯 ENHANCED POKER DETECTION SYSTEM")
+    print("🎯 GPT-4 ENHANCED POKER DETECTION SYSTEM")
     print("🃏 Community Cards: 3-5 cards in center (3h, Ks, Td, 9c, As)")
     print("🃏 Hole Cards: 2 cards at bottom (player's private cards)")
+    print("🤖 GPT-4 Vision: Advanced rank+suit detection (As, Kh, Qd, Jc, Td)")
     print("💰 Bets: Betting amounts (200, 800, etc.)")
     print("💵 Stacks: Chip stacks (4.8K, 66.7K, 18.6K, 2.4K)")
     print("🏆 Pot: Pot amounts (Pot:1.1K)")
@@ -1484,7 +1578,8 @@ if __name__ == "__main__":
     
     run_focused_poker_detection()
     
-    print("\n✅ Enhanced poker detection completed!")
+    print("\n✅ GPT-4 Enhanced poker detection completed!")
     print(f"📁 Check results in: {OUTPUT_CHECK_DIR}")
-    print("🎯 Community cards with rank+suit detected!")
+    print("🎯 Community cards with rank+suit detected using GPT-4!")
+    print("🤖 GPT-4 Vision analysis for accurate card detection!")
     print("🎮 Game state awareness enabled!")
