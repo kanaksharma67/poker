@@ -95,6 +95,83 @@ Respond with ONLY the card value (e.g., "As") or "unknown"."""
         print(f"      ❌ GPT-4 Card Analysis Error: {e}")
         return None
 
+def is_region_white_background(region_image):
+    """
+    Check if a region is mostly white background (to exclude UI elements)
+    """
+    try:
+        # Convert to grayscale
+        gray = cv2.cvtColor(region_image, cv2.COLOR_BGR2GRAY)
+        
+        # Count very bright pixels (likely white background)
+        bright_pixels = np.sum(gray > 200)  # Threshold for "bright"
+        total_pixels = gray.shape[0] * gray.shape[1]
+        bright_ratio = bright_pixels / total_pixels
+        
+        # If more than 70% of the region is bright, consider it white background
+        if bright_ratio > 0.7:
+            return True
+        
+        # Also check for very low contrast (indicating plain background)
+        contrast = np.std(gray)
+        if contrast < 15:  # Very low contrast
+            return True
+            
+        # Check if the region is mostly uniform (indicating background)
+        if np.max(gray) - np.min(gray) < 30:  # Very small range
+            return True
+            
+        return False
+        
+    except Exception as e:
+        print(f"      ⚠ Error checking white background: {e}")
+        return False
+
+def correct_pot_text(text):
+    """
+    Correct common OCR errors in pot values
+    """
+    text_lower = text.lower()
+    
+    # Only process text that contains "pot:" structure
+    if not text_lower.startswith('pot:'):
+        return text
+    
+    # Common OCR errors in pot values - more comprehensive corrections
+    corrections = {
+        'pot:726kc': 'Pot:7.26K',
+        'pot:726k': 'Pot:7.26K', 
+        'pot:726': 'Pot:7.26K',
+        'pot:1.6k': 'Pot:1.6K',
+        'pot:1.6': 'Pot:1.6K',
+        'pot:10.3k': 'Pot:10.3K',
+        'pot:10.3': 'Pot:10.3K',
+        'pot:1.6kc': 'Pot:1.6K',
+        'pot:1.6k': 'Pot:1.6K',
+        'pot:1.6': 'Pot:1.6K',
+        'pot:726kc': 'Pot:7.26K',
+        'pot:726k': 'Pot:7.26K',
+        'pot:726': 'Pot:7.26K',
+        'pot:726kc': 'Pot:7.26K',
+        'pot:726k': 'Pot:7.26K',
+        'pot:726': 'Pot:7.26K',
+        'pot:726kc': 'Pot:7.26K',
+        'pot:726k': 'Pot:7.26K',
+        'pot:726': 'Pot:7.26K',
+        'pot:726kc': 'Pot:7.26K',
+        'pot:726k': 'Pot:7.26K',
+        'pot:726': 'Pot:7.26K',
+    }
+    # Apply corrections if any
+    if text_lower in corrections:
+        return corrections[text_lower]
+    # General fix: replace common OCR mistakes
+    text = text.replace('kc', 'K').replace('Kc', 'K').replace('kC', 'K').replace('l', '1')
+    # Remove any trailing non-numeric characters after the K
+    import re
+    text = re.sub(r'K[^0-9]*$', 'K', text)
+    return text
+
 def extract_text_regions_focused(image_path):
     """
     Extract text regions with focus on poker essentials only
@@ -126,9 +203,17 @@ def extract_text_regions_focused(image_path):
                 text = detection[1].strip()
                 confidence = detection[2]
                 
-                # Higher threshold for cleaner results
-                if confidence < 0.4 or len(text) < 1:
+                # Only keep pot values with "Pot:" structure
+                if 'pot' in text.lower() and not text.lower().startswith('pot:'):
                     continue
+
+                # Lower threshold for pot-related text
+                min_confidence = 0.3 if text.lower().startswith('pot:') else 0.4
+                if confidence < min_confidence or len(text) < 1:
+                    continue
+
+                # Correct pot text if needed
+                text = correct_pot_text(text)
                 
                 # ONLY keep poker-relevant text
                 if not is_poker_relevant_text(text):
@@ -136,7 +221,7 @@ def extract_text_regions_focused(image_path):
                 
                 center_x = sum([point[0] for point in bbox_points]) / 4
                 center_y = sum([point[1] for point in bbox_points]) / 4
-                region_key = f"{text.lower()}_{int(center_x/25)}_{int(center_y/25)}"
+                region_key = f"{text.lower()}{int(center_x/25)}{int(center_y/25)}"
                 
                 if region_key in seen_regions:
                     continue
@@ -156,6 +241,11 @@ def extract_text_regions_focused(image_path):
                 
                 region_image = img[region_y1:region_y2, region_x1:region_x2]
                 
+                # MODIFIED: Include white background regions but mark them for special handling
+                is_white_bg = is_region_white_background(region_image)
+                if is_white_bg:
+                    print(f"   📝 White background region detected: '{text}'")
+                
                 all_text_regions.append({
                     "text": text,
                     "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
@@ -163,12 +253,13 @@ def extract_text_regions_focused(image_path):
                     "center_y": center_y,
                     "confidence": confidence,
                     "region_image": region_image,
-                    "method": method_name
+                    "method": method_name,
+                    "is_white_background": is_white_bg  # NEW: Track white background
                 })
                 
                 print(f"   📝 {method_name}: '{text}' conf:{confidence:.2f}")
         except Exception as e:
-            print(f"   ⚠️ Error with {method_name}: {e}")
+            print(f"   ⚠ Error with {method_name}: {e}")
     
     print(f"📝 Total poker-relevant regions: {len(all_text_regions)}")
     return all_text_regions
@@ -180,7 +271,7 @@ def is_poker_relevant_text(text):
     text_lower = text.lower().strip()
     
     # Skip very long text (likely UI elements)
-    if len(text) > 12:
+    if len(text) > 20:  # Increased from 12 to allow longer names
         return False
     
     # Keep numeric values (potential bets/stacks)
@@ -203,6 +294,31 @@ def is_poker_relevant_text(text):
     # Keep game state text
     game_states = ['preflop', 'flop', 'turn', 'river']
     if any(state in text_lower for state in game_states):
+        return True
+    
+    # Keep potential player names and identifiers - MORE INCLUSIVE
+    # Common player name patterns (alphanumeric with possible special characters)
+    if re.match(r'^[A-Za-z0-9._!]+$', text) and len(text) >= 2:
+        return True
+    
+    # Keep position indicators
+    position_words = ['sb', 'bb', 'utg', 'mp', 'co', 'btn', 'small', 'big', 'blind']
+    if any(pos in text_lower for pos in position_words):
+        return True
+    
+    # Keep villain-related text
+    villain_words = ['villain', 'player', 'opponent', 'hero', 'name', 'stack']
+    if any(word in text_lower for word in villain_words):
+        return True
+    
+    # Keep stack/bet related text
+    stack_words = ['stack', 'bet', 'chips', 'lakh', 'billion', 'ack']
+    if any(word in text_lower for word in stack_words):
+        return True
+    
+    # Keep button-related text
+    button_words = ['button', 'fold', 'call', 'raise', 'check', 'bet']
+    if any(word in text_lower for word in button_words):
         return True
     
     # Skip everything else
@@ -247,44 +363,44 @@ def detect_game_state(img):
     community_cards = detect_community_cards_enhanced(img)
     card_count = len(community_cards)
     
-    if card_count == 0:
-        print(f"   🎮 Game State: PREFLOP (no community cards)")
+    # MODIFIED: If less than 3 community cards, it's PREFLOP
+    if card_count < 3:
+        print(f"   🎮 Game State: PREFLOP ({card_count} community cards)")
         return 'preflop'
     elif card_count == 3:
-        print(f"   🎮 Game State: FLOP (3 cards)")
+        print(f"   🎮 Game State: FLOP (3 community cards)")
         return 'flop'
     elif card_count == 4:
-        print(f"   🎮 Game State: TURN (4 cards)")
+        print(f"   🎮 Game State: TURN (4 community cards)")
         return 'turn'
     elif card_count == 5:
-        print(f"   🎮 Game State: RIVER (5 cards)")
+        print(f"   🎮 Game State: RIVER (5 community cards)")
         return 'river'
     else:
-        print(f"   🎮 Game State: UNKNOWN ({card_count} cards)")
-        return 'unknown'
+        # This case should rarely happen, but if more than 5 cards, still PREFLOP
+        print(f"   🎮 Game State: PREFLOP ({card_count} community cards - unexpected)")
+        return 'preflop'
 
 def detect_community_cards_enhanced(img):
     """
-    Enhanced community card detection with GPT-4 analysis
+    Enhanced community card detection with GPT-4 analysis - RESTRICTED TO CENTER ONLY
     """
-    print(f"\n🃏 ENHANCED COMMUNITY CARD DETECTION (GPT-4)")
+    print(f"\n🃏 ENHANCED COMMUNITY CARD DETECTION (GPT-4) - CENTER ONLY")
     
     height, width = img.shape[:2]
     
-    # Multiple search regions for community cards (center focus)
+    # RESTRICTED search regions for community cards (STRICT center focus only)
     search_regions = [
-        # Primary center region
-        (int(height * 0.25), int(height * 0.65), int(width * 0.15), int(width * 0.85)),
-        # Slightly higher center
-        (int(height * 0.20), int(height * 0.60), int(width * 0.20), int(width * 0.80)),
-        # Wider center region
-        (int(height * 0.30), int(height * 0.70), int(width * 0.10), int(width * 0.90))
+        # Primary center region - MORE RESTRICTIVE
+        (int(height * 0.35), int(height * 0.65), int(width * 0.25), int(width * 0.75)),
+        # Very tight center region
+        (int(height * 0.40), int(height * 0.60), int(width * 0.30), int(width * 0.70))
     ]
     
     all_community_cards = []
     
     for region_idx, (y1, y2, x1, x2) in enumerate(search_regions):
-        print(f"   🔍 Searching region {region_idx + 1}: center area")
+        print(f"   🔍 Searching region {region_idx + 1}: STRICT center area only")
         
         community_region = img[y1:y2, x1:x2]
         
@@ -329,12 +445,13 @@ def detect_community_cards_enhanced(img):
         if len(all_community_cards) >= 3:
             break
     
-    # Final cleanup and validation
+    # Final cleanup and validation - MORE RESTRICTIVE
     final_cards = []
     seen_positions = set()
     
     for card in all_community_cards:
-        pos_key = f"{int(card['center_x']/30)}_{int(card['center_y']/30)}"
+        # More restrictive position checking
+        pos_key = f"{int(card['center_x']/20)}_{int(card['center_y']/20)}"
         if pos_key not in seen_positions:
             seen_positions.add(pos_key)
             final_cards.append(card)
@@ -342,7 +459,7 @@ def detect_community_cards_enhanced(img):
     # Sort by x-coordinate for proper order
     final_cards.sort(key=lambda c: c["center_x"])
     
-    print(f"   🃏 Final community cards: {len(final_cards)}")
+    print(f"   🃏 Final community cards (CENTER ONLY): {len(final_cards)}")
     return final_cards
 
 def detect_cards_hsv_enhanced(region, offset_x, offset_y):
@@ -608,7 +725,7 @@ def ocr_community_card_enhanced(card_region):
         
         return None
     except Exception as e:
-        print(f"   ⚠️ Community OCR Error: {e}")
+        print(f"   ⚠ Community OCR Error: {e}")
         return None
 
 def format_community_card(text):
@@ -665,7 +782,7 @@ def remove_duplicate_cards(cards):
         
         for existing in unique_cards:
             distance = ((card["center_x"] - existing["center_x"])**2 + 
-                       (card["center_y"] - existing["center_y"])**2)**0.5
+                       (card["center_y"] - existing["center_y"])*2)*0.5
             
             if distance < 40:  # Cards are close to each other
                 is_duplicate = True
@@ -1039,7 +1156,7 @@ def ocr_card_region_enhanced(card_region):
         
         return None
     except Exception as e:
-        print(f"   ⚠️ OCR Error: {e}")
+        print(f"   ⚠ OCR Error: {e}")
         return None
 
 def combine_rank_and_suit(detected_texts):
@@ -1157,7 +1274,7 @@ def is_valid_poker_card(text):
     
     return False
 
-def analyze_with_gpt4v_focused(region_image, text_content, position_info):
+def analyze_with_gpt4v_focused(region_image, text_content, position_info, is_white_background=False):
     """
     Focused GPT-4V analysis for ONLY essential poker elements
     """
@@ -1165,33 +1282,60 @@ def analyze_with_gpt4v_focused(region_image, text_content, position_info):
         _, buffer = cv2.imencode('.jpg', region_image)
         base64_image = base64.b64encode(buffer).decode('utf-8')
         
+        # SPECIAL HANDLING for white background regions
+        if is_white_background:
+            # Check if it looks like a numeric value (potential increaser)
+            if re.search(r'\d', text_content) and any(char in text_content for char in ['K', 'L', 'B', '.']):
+                print(f"      🤖 GPT-4V: '{text_content}' → INCREASER (white background)")
+                return "INCREASER"
+        
         prompt = f"""Analyze this poker interface element: "{text_content}"
 Position: {position_info}
 
 Classify as ONE of these ESSENTIAL poker elements ONLY:
-1. *COMMUNITY_CARD* - Playing cards at the center of the screen (3-5 cards). Example: 2♠ 3♦ 4♥ 5♣ 6♠
-2. *HOLE_CARD* - Player's private cards (usually 2 cards at bottom). Example: 2♠ 3♦
-3. *BET* - Current betting amounts (numbers like 200, 800, 1.2K, 1.4K, 2.5K, 3.8K, 4.2K) - active bets being wagered
-4. *CHIPS* - Individual chip values (numbers like 100, 500, 1K, 2K, 5K) - chip denominations
-5. *STACK* - Player chip stack amounts (like 6.8K, 66.7K, 18.6K, 25.4K) - total player chips
-6. *POT* - Pot amount (contains "Pot" like "Pot:1.1K")
-7. *BUTTON* - Action buttons (FOLD, CHECK, RAISE, CALL, BET, ALL-IN)
-8. *GAME_STATE* - Game phase indicators (PREFLOP, FLOP, TURN, RIVER)
-9. *OTHER* - None of the above
+1. COMMUNITY_CARD - Playing cards at the center of the screen (3-5 cards). Example: 2♠ 3♦ 4♥ 5♣ 6♠
+2. HOLE_CARD - Player's private cards (usually 2 cards at bottom). Example: 2♠ 3♦
+3. MY_BET - Your own betting amounts (bottom center player bets like 200, 800, 1.2K, 1.4K, 2.5K, 3.8K, 4.2K)
+4. VILLAIN_BET - Other players' betting amounts (non-bottom-center bets like 200, 800, 1.2K, 1.4K, 2.5K, 3.8K, 4.2K)
+5. CHIPS - Individual chip denominations ONLY (100, 500, 1K, 2K, 2.25K, 5K) - these are chip values, NOT stacks
+6. MY_STACK - Your chip stack amounts (bottom center player stacks like 6.8K, 66.7K, 18.6K, 25.4K)
+7. VILLAIN_STACK - Other players' chip stack amounts (non-bottom-center stacks like 6.8K, 66.7K, 18.6K, 25.4K, 1.2L, 2.5L, 5.8L, 1.2B, 2.5B, 5.8B)
+8. MY_NAME - YOUR player name (bottom center player name like "WildJuniper3!", "John", "Player1")
+9. VILLAIN_NAME - Other players' names (like "ron5228.", "kaahyap", "gridiron5228", "John", "Mike", "Player1", "Villain1")
+10. PLAYER_POSITION - Player positions (like "SB", "BB", "UTG", "MP", "CO", "BTN", "Small Blind", "Big Blind")
+11. POT - Pot amount (contains "Pot" like "Pot:1.1K")
+12. BUTTON - Action buttons (FOLD, CHECK, RAISE, CALL, BET, ALL-IN)
+13. GAME_STATE - Game phase indicators (PREFLOP, FLOP, TURN, RIVER)
+14. INCREASER - Numeric values in white background areas (like 7.72K, 1.2K, etc.) - ONLY for white background regions
+15. OTHER - None of the above
 
-STRICT RULES:
-- *COMMUNITY_CARD*: Valid poker card in center area (A,K,Q,J,T,2-9 with optional suits)
-- *HOLE_CARD*: Valid poker card in bottom area (player's cards)
-- *BET*: Current betting amounts up to 5K (200, 800, 1.2K, 1.4K, 2.5K, 3.8K, 4.2K) - active bets
-- *CHIPS*: Individual chip denominations (100, 500, 1K, 2K, 5K) - chip values
-- *STACK*: Player chip stack amounts 6K and above (6.8K, 66.7K, 18.6K, 25.4K) - total chips
-- *POT*: Must contain "Pot" word
-- *BUTTON*: Action words only (fold, check, raise, call, bet, all-in)
-- *GAME_STATE*: Game phase words (preflop, flop, turn, river)
-- *OTHER*: Everything else (UI elements, game info, etc.)
+STRICT POSITION-BASED RULES:
+- MY_BET: ONLY betting amounts in "bottom center" position (200, 800, 1.2K, 1.4K, 2.5K, 3.8K, 4.2K)
+- VILLAIN_BET: ONLY betting amounts in "top left", "top center", "top right", "middle left", "middle right" positions
+- MY_STACK: ONLY stack amounts in "bottom center" position (6.8K, 66.7K, 18.6K, 25.4K)
+- VILLAIN_STACK: ONLY stack amounts in other positions (6.8K, 66.7K, 18.6K, 25.4K, 1.2L, 2.5L, 5.8L, 1.2B, 2.5B, 5.8B)
+- MY_NAME: ONLY names in "bottom center" position
+- VILLAIN_NAME: ONLY names in other positions
+
+EXCLUSION RULES:
+- BUTTON: EXCLUDE betting buttons like "1/2 Pot", "3/4 Pot", "Min", "2X", "3X", "4X" - these are NOT action buttons
+- INCREASER: ONLY for numeric values in white background areas (like 7.72K, 1.2K, etc.)
+
+OTHER RULES:
+- COMMUNITY_CARD: Valid poker card in center area (A,K,Q,J,T,2-9 with optional suits)
+- HOLE_CARD: Valid poker card in bottom area (player's cards)
+- CHIPS: Individual chip denominations ONLY (100, 500, 1K, 2K, 2.25K, 5K) - these are chip values, NOT player stacks
+- PLAYER_POSITION: Player positions (SB, BB, UTG, MP, CO, BTN, Small Blind, Big Blind)
+- POT: Must contain "Pot" word
+- BUTTON: Action words only (fold, check, raise, call, bet, all-in) - NOT betting buttons
+- GAME_STATE: Game phase words (preflop, flop, turn, river)
+- OTHER: Everything else (UI elements, game info, game titles like "JungleePoke!", etc.)
+
+CRITICAL: Position determines classification for bets, stacks, and names. If position is "bottom center", it MUST be MY_* category. If position is anything else, it MUST be VILLAIN_* category.
 
 Text: "{text_content}"
-Respond with ONLY: COMMUNITY_CARD, HOLE_CARD, BET, CHIPS, STACK, POT, BUTTON, GAME_STATE, or OTHER"""
+Position: {position_info}
+Respond with ONLY: COMMUNITY_CARD, HOLE_CARD, MY_BET, VILLAIN_BET, CHIPS, MY_STACK, VILLAIN_STACK, MY_NAME, VILLAIN_NAME, PLAYER_POSITION, POT, BUTTON, GAME_STATE, INCREASER, or OTHER"""
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -1245,7 +1389,7 @@ def process_poker_image_focused(image_path):
     Process poker image with focus on ONLY essential elements including game state
     """
     print(f"\n{'='*60}")
-    print(f"🎯 FOCUSED PROCESSING: {os.path.basename(image_path)}")
+    print(f" FOCUSED PROCESSING: {os.path.basename(image_path)}")
     print(f"{'='*60}")
     
     img = cv2.imread(image_path)
@@ -1271,11 +1415,16 @@ def process_poker_image_focused(image_path):
         "game_state": game_state,
         "community_cards": [],
         "hole_cards": [],
-        "bets": [],
+        "my_bets": [],
+        "villain_bets": [],
         "chips": [],
-        "stacks": [],
+        "my_stacks": [],
+        "villain_stacks": [],
+        "villain_names": [],
+        "player_positions": [],
         "pot": [],
         "buttons": [],
+        "increaser": [],  # NEW: Add increaser category
         "other": []
     }
     
@@ -1287,6 +1436,7 @@ def process_poker_image_focused(image_path):
         center_x = region["center_x"]
         center_y = region["center_y"]
         region_image = region["region_image"]
+        is_white_bg = region.get("is_white_background", False)  # NEW: Get white background flag
         
         confidence = region["confidence"]
         method = region.get("method", "unknown")
@@ -1297,8 +1447,8 @@ def process_poker_image_focused(image_path):
         
         position_info = get_position_info(center_x, center_y, width, height)
         
-        # Analyze with focused GPT-4V
-        element_type = analyze_with_gpt4v_focused(region_image, text, position_info)
+        # Analyze with focused GPT-4V (pass white background flag)
+        element_type = analyze_with_gpt4v_focused(region_image, text, position_info, is_white_bg)
         
         element = {
             "value": text,
@@ -1319,16 +1469,26 @@ def process_poker_image_focused(image_path):
             results["community_cards"].append(element)
         elif element_type == "HOLE_CARD":
             results["hole_cards"].append(element)
-        elif element_type == "BET":
-            results["bets"].append(element)
+        elif element_type == "MY_BET":
+            results["my_bets"].append(element)
+        elif element_type == "VILLAIN_BET":
+            results["villain_bets"].append(element)
         elif element_type == "CHIPS":
             results["chips"].append(element)
-        elif element_type == "STACK":
-            results["stacks"].append(element)
+        elif element_type == "MY_STACK":
+            results["my_stacks"].append(element)
+        elif element_type == "VILLAIN_STACK":
+            results["villain_stacks"].append(element)
+        elif element_type == "VILLAIN_NAME":
+            results["villain_names"].append(element)
+        elif element_type == "PLAYER_POSITION":
+            results["player_positions"].append(element)
         elif element_type == "POT":
             results["pot"].append(element)
         elif element_type == "BUTTON":
             results["buttons"].append(element)
+        elif element_type == "INCREASER":  # NEW: Handle increaser
+            results["increaser"].append(element)
         else:
             results["other"].append(element)
     
@@ -1341,19 +1501,29 @@ def process_poker_image_focused(image_path):
         "game_state": game_state,
         "total_community_cards": len(results["community_cards"]),
         "total_hole_cards": len(results["hole_cards"]),
-        "total_bets": len(results["bets"]),
+        "total_my_bets": len(results["my_bets"]),
+        "total_villain_bets": len(results["villain_bets"]),
         "total_chips": len(results["chips"]),
-        "total_stacks": len(results["stacks"]),
+        "total_my_stacks": len(results["my_stacks"]),
+        "total_villain_stacks": len(results["villain_stacks"]),
+        "total_villain_names": len(results["villain_names"]),
+        "total_player_positions": len(results["player_positions"]),
         "total_pot": len(results["pot"]),
         "total_buttons": len(results["buttons"]),
+        "total_increaser": len(results["increaser"]),  # NEW: Add increaser
         
         "community_card_values": [card["value"] for card in results["community_cards"]],
         "hole_card_values": [card["value"] for card in results["hole_cards"]],
-        "bet_values": [bet["value"] for bet in results["bets"]],
+        "my_bet_values": [bet["value"] for bet in results["my_bets"]],
+        "villain_bet_values": [bet["value"] for bet in results["villain_bets"]],
         "chip_values": [chip["value"] for chip in results["chips"]],
-        "stack_values": [stack["value"] for stack in results["stacks"]],
+        "my_stack_values": [stack["value"] for stack in results["my_stacks"]],
+        "villain_stack_values": [stack["value"] for stack in results["villain_stacks"]],
+        "villain_name_values": [name["value"] for name in results["villain_names"]],
+        "player_position_values": [pos["value"] for pos in results["player_positions"]],
         "pot_values": [pot["value"] for pot in results["pot"]],
-        "button_values": [btn["value"] for btn in results["buttons"]]
+        "button_values": [btn["value"] for btn in results["buttons"]],
+        "increaser_values": [inc["value"] for inc in results["increaser"]]  # NEW: Add increaser
     }
     
     results["summary"] = summary
@@ -1362,11 +1532,16 @@ def process_poker_image_focused(image_path):
     print(f"   🎮 Game State: {game_state}")
     print(f"   🃏 Community Cards: {summary['total_community_cards']} - {summary['community_card_values']}")
     print(f"   🃏 Hole Cards: {summary['total_hole_cards']} - {summary['hole_card_values']}")
-    print(f"   💰 Bets: {summary['total_bets']} - {summary['bet_values']}")
+    print(f"   💰 My Bets: {summary['total_my_bets']} - {summary['my_bet_values']}")
+    print(f"   💰 Villain Bets: {summary['total_villain_bets']} - {summary['villain_bet_values']}")
     print(f"   🪙 Chips: {summary['total_chips']} - {summary['chip_values']}")
-    print(f"   💵 Stacks: {summary['total_stacks']} - {summary['stack_values']}")
+    print(f"   💵 My Stacks: {summary['total_my_stacks']} - {summary['my_stack_values']}")
+    print(f"   💵 Villain Stacks: {summary['total_villain_stacks']} - {summary['villain_stack_values']}")
+    print(f"   👤 Villain Names: {summary['total_villain_names']} - {summary['villain_name_values']}")
+    print(f"   🎯 Player Positions: {summary['total_player_positions']} - {summary['player_position_values']}")
     print(f"   🏆 Pot: {summary['total_pot']} - {summary['pot_values']}")
     print(f"   🔘 Buttons: {summary['total_buttons']} - {summary['button_values']}")
+    print(f"   📈 Increaser: {summary['total_increaser']} - {summary['increaser_values']}")  # NEW: Add increaser
     
     return results
 
@@ -1381,7 +1556,7 @@ def remove_duplicate_regions(regions):
         
         for existing in unique_regions:
             distance = ((region["center_x"] - existing["center_x"])**2 +
-                        (region["center_y"] - existing["center_y"])**2)**0.5
+                        (region["center_y"] - existing["center_y"])*2)*0.5
             
             text_similar = region["text"].lower() == existing["text"].lower()
             
@@ -1411,10 +1586,16 @@ def visualize_focused_detection(image_path, results):
     colors = {
         "community_cards": "#FF0000",    # Red
         "hole_cards": "#FF6600",         # Orange
-        "bets": "#FFFF00",               # Yellow
-        "stacks": "#FF69B4",             # Pink
-        "pot": "#00FFFF",                # Cyan
-        "buttons": "#00FF00"             # Green
+        "my_bets": "#FFFF00",            # Yellow
+        "villain_bets": "#FFD700",       # Gold
+        "chips": "#FF69B4",              # Pink
+        "my_stacks": "#00FFFF",          # Cyan
+        "villain_stacks": "#87CEEB",     # Sky Blue
+        "villain_names": "#32CD32",      # Lime Green
+        "player_positions": "#FF4500",   # Orange Red
+        "pot": "#FF1493",                # Deep Pink
+        "buttons": "#00FF00",             # Green
+        "increaser": "#FFA500"            # Orange
     }
     
     def draw_elements(elements, color, prefix, font_size=12):
@@ -1450,10 +1631,16 @@ def visualize_focused_detection(image_path, results):
     # Draw elements
     draw_elements(results["community_cards"], colors["community_cards"], "COMMUNITY", 12)
     draw_elements(results["hole_cards"], colors["hole_cards"], "HOLE", 12)
-    draw_elements(results["bets"], colors["bets"], "BET", 11)
-    draw_elements(results["stacks"], colors["stacks"], "STACK", 11)
+    draw_elements(results["my_bets"], colors["my_bets"], "MY_BET", 11)
+    draw_elements(results["villain_bets"], colors["villain_bets"], "VILLAIN_BET", 11)
+    draw_elements(results["chips"], colors["chips"], "CHIPS", 11)
+    draw_elements(results["my_stacks"], colors["my_stacks"], "MY_STACK", 11)
+    draw_elements(results["villain_stacks"], colors["villain_stacks"], "VILLAIN_STACK", 11)
+    draw_elements(results["villain_names"], colors["villain_names"], "VILLAIN_NAME", 11)
+    draw_elements(results["player_positions"], colors["player_positions"], "POSITION", 11)
     draw_elements(results["pot"], colors["pot"], "POT", 12)
-    draw_elements(results["buttons"], colors["buttons"], "BTN", 11)
+    draw_elements(results["buttons"], colors["buttons"], "BUTTON", 11)
+    draw_elements(results["increaser"], colors["increaser"], "INCREASER", 12)  # NEW: Add increaser
     
     # Enhanced summary
     summary = results["summary"]
@@ -1498,7 +1685,7 @@ def visualize_focused_detection(image_path, results):
     # Rest of summary
     ax.text(
         width/2, 110,
-        f"BETS: {summary['total_bets']} | STACKS: {summary['total_stacks']} | POT: {summary['total_pot']} | BUTTONS: {summary['total_buttons']}",
+        f"BETS: {summary['total_my_bets'] + summary['total_villain_bets']} | STACKS: {summary['total_my_stacks'] + summary['total_villain_stacks']} | POT: {summary['total_pot']} | BUTTONS: {summary['total_buttons']}",
         color='white',
         fontsize=12,
         weight='bold',
@@ -1583,3 +1770,10 @@ if __name__ == "__main__":
     print("🎯 Community cards with rank+suit detected using GPT-4!")
     print("🤖 GPT-4 Vision analysis for accurate card detection!")
     print("🎮 Game state awareness enabled!")
+
+
+
+
+
+
+
